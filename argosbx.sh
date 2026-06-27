@@ -183,6 +183,16 @@ fi
 uuid=$(cat "$HOME/agsbx/uuid")
 echo "UUID密码：$uuid"
 }
+save_argo_compat_ports(){
+tmp_ports="$HOME/agsbx/argo_compat_ports.tmp"
+: > "$tmp_ports"
+[ -s "$HOME/agsbx/argoport.log" ] && cat "$HOME/agsbx/argoport.log" >> "$tmp_ports"
+[ -s "$HOME/agsbx/xr.json" ] && grep -Eo '"tag"[[:space:]]*:[[:space:]]*"vmess-xr-argo-[0-9]+"' "$HOME/agsbx/xr.json" | grep -Eo '[0-9]+' >> "$tmp_ports" 2>/dev/null
+[ -s "$HOME/agsbx/sb.json" ] && grep -Eo '"tag"[[:space:]]*:[[:space:]]*"vmess-sb-argo-[0-9]+"' "$HOME/agsbx/sb.json" | grep -Eo '[0-9]+' >> "$tmp_ports" 2>/dev/null
+command -v journalctl >/dev/null 2>&1 && journalctl -u argo --no-pager -n 200 2>/dev/null | grep -Eo 'originService=http://localhost:[0-9]+' | grep -Eo '[0-9]+' >> "$tmp_ports" 2>/dev/null
+grep -E '^[0-9]+$' "$tmp_ports" 2>/dev/null | sort -n -u > "$HOME/agsbx/argo_compat_ports"
+rm -f "$tmp_ports"
+}
 installxray(){
 echo
 echo "=========启用xray内核========="
@@ -190,6 +200,7 @@ mkdir -p "$HOME/agsbx/xrk"
 if [ ! -e "$HOME/agsbx/xray" ]; then
 upxray
 fi
+save_argo_compat_ports
 cat > "$HOME/agsbx/xr.json" <<EOF
 {
   "log": {
@@ -427,6 +438,7 @@ fi
 installsb(){
 echo
 echo "=========启用Sing-box内核========="
+save_argo_compat_ports
 if [ ! -e "$HOME/agsbx/sing-box" ]; then
 upsingbox
 fi
@@ -442,7 +454,7 @@ EOF
 insuuid
 if [ ! -f "$HOME/agsbx/SHA256.txt" ]; then
 command -v openssl >/dev/null 2>&1 && openssl ecparam -genkey -name prime256v1 -out "$HOME/agsbx/private.key" >/dev/null 2>&1
-command -v openssl >/dev/null 2>&1 && openssl req -new -x509 -days 36500 -key "$HOME/agsbx/private.key" -out "$HOME/agsbx/cert.crt" -subj "/CN=www.bing.com" >/dev/null 2>&1
+command -v openssl >/dev/null 2>&1 && openssl req -new -x509 -days 36500 -key "$HOME/agsbx/private.key" -out "$HOME/agsbx/cert.crt" -subj "/CN=www.bing.com" -addext "subjectAltName=DNS:www.bing.com" >/dev/null 2>&1
 #if [ ! -f "$HOME/agsbx/private.key" ]; then
 #url="https://github.com/yonggekkk/argosbx/releases/download/argosbx/private.key"; out="$HOME/agsbx/private.key"; (command -v curl>/dev/null 2>&1 && curl -Ls -o "$out" --retry 2 "$url") || (command -v wget>/dev/null 2>&1 && timeout 3 wget -q -O "$out" --tries=2 "$url")
 #url="https://github.com/yonggekkk/argosbx/releases/download/argosbx/cert.crt"; out="$HOME/agsbx/cert.crt"; (command -v curl>/dev/null 2>&1 && curl -Ls -o "$out" --retry 2 "$url") || (command -v wget>/dev/null 2>&1 && timeout 3 wget -q -O "$out" --tries=2 "$url")
@@ -769,7 +781,106 @@ sop=soptargo
 fi
 }
 
+add_argo_compat_inbound(){
+if [ "$argo" = "vwpt" ]; then
+current_argo_port="$port_vw"
+current_argo_proto="vless"
+else
+current_argo_port="$port_vm_ws"
+current_argo_proto="vmess"
+fi
+compat_ports=$(cat "$HOME/agsbx/argo_compat_ports" "$HOME/agsbx/argoport.log" 2>/dev/null | grep -E '^[0-9]+$' | sort -n -u)
+for compat_port in $compat_ports; do
+[ -n "$current_argo_port" ] || continue
+[ "$compat_port" != "$current_argo_port" ] || continue
+if [ -e "$HOME/agsbx/xr.json" ] && ! grep -q "\"port\": ${compat_port}" "$HOME/agsbx/xr.json"; then
+if [ "$current_argo_proto" = "vless" ]; then
+cat >> "$HOME/agsbx/xr.json" <<EOF
+    {
+      "tag":"vless-ws-argo-${compat_port}",
+      "listen": "::",
+      "port": ${compat_port},
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "${uuid}",
+            "flow": "xtls-rprx-vision"
+          }
+        ],
+        "decryption": "${dekey}"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "${uuid}-vw"
+        }
+      },
+        "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"],
+        "metadataOnly": false
+      }
+    },
+EOF
+else
+cat >> "$HOME/agsbx/xr.json" <<EOF
+        {
+            "tag": "vmess-xr-argo-${compat_port}",
+            "listen": "::",
+            "port": ${compat_port},
+            "protocol": "vmess",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "${uuid}"
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "ws",
+                "security": "none",
+                "wsSettings": {
+                  "path": "${uuid}-vm"
+            }
+        },
+            "sniffing": {
+            "enabled": true,
+            "destOverride": ["http", "tls", "quic"],
+            "metadataOnly": false
+            }
+         },
+EOF
+fi
+elif [ -e "$HOME/agsbx/sb.json" ] && ! grep -q "\"listen_port\": ${compat_port}" "$HOME/agsbx/sb.json"; then
+if [ "$current_argo_proto" = "vmess" ]; then
+cat >> "$HOME/agsbx/sb.json" <<EOF
+{
+        "type": "vmess",
+        "tag": "vmess-sb-argo-${compat_port}",
+        "listen": "::",
+        "listen_port": ${compat_port},
+        "users": [
+            {
+                "uuid": "${uuid}",
+                "alterId": 0
+            }
+        ],
+        "transport": {
+            "type": "ws",
+            "path": "${uuid}-vm",
+            "max_early_data":2048,
+            "early_data_header_name": "Sec-WebSocket-Protocol"
+        }
+    },
+EOF
+fi
+fi
+done
+}
+
 xrsbout(){
+add_argo_compat_inbound
 if [ -e "$HOME/agsbx/xr.json" ]; then
 sed -i '${s/,\s*$//}' "$HOME/agsbx/xr.json"
 cat >> "$HOME/agsbx/xr.json" <<EOF
@@ -997,7 +1108,9 @@ echo "下载Cloudflared-argo最新正式版内核：$argocore"
 url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$cpu"; out="$HOME/agsbx/cloudflared"; (command -v curl>/dev/null 2>&1 && curl -Lo "$out" -# --retry 2 "$url") || (command -v wget>/dev/null 2>&1 && timeout 3 wget -O "$out" --tries=2 "$url")
 chmod +x "$HOME/agsbx/cloudflared"
 fi
+old_argoport=$(cat "$HOME/agsbx/argoport.log" 2>/dev/null)
 if [ "$argo" = "vmpt" ]; then argoport=$(cat "$HOME/agsbx/port_vm_ws" 2>/dev/null); echo "Vmess" > "$HOME/agsbx/vlvm"; elif [ "$argo" = "vwpt" ]; then argoport=$(cat "$HOME/agsbx/port_vw" 2>/dev/null); echo "Vless" > "$HOME/agsbx/vlvm"; fi; echo "$argoport" > "$HOME/agsbx/argoport.log"
+[ -n "${ARGO_DOMAIN}" ] && [ -n "${ARGO_AUTH}" ] && [ -n "$old_argoport" ] && echo "$old_argoport" > "$HOME/agsbx/argoport.log"
 if [ -n "${ARGO_DOMAIN}" ] && [ -n "${ARGO_AUTH}" ]; then
 argoname='固定'
 if pidof systemd >/dev/null 2>&1 && [ "$EUID" -eq 0 ]; then
@@ -1553,7 +1666,7 @@ else
 hyps=
 fi
 #hy2_link="hysteria2://$uuid@$server_ip:$port_hy2?security=tls&alpn=h3&insecure=1&allowInsecure=1$hyps&sni=www.bing.com#${sxname}hy2-$hostname"
-hy2_link="hysteria2://$uuid@$server_ip:$port_hy2?security=tls&alpn=h3&insecure=0&allowInsecure=0$hyps&sni=www.bing.com&pinSHA256=$SHA256#${sxname}hy2-$hostname"
+hy2_link="hysteria2://$uuid@$server_ip:$port_hy2?security=tls&alpn=h3&insecure=1&allowInsecure=1&upmbps=1000&downmbps=1000$hyps&sni=www.bing.com&pinSHA256=$SHA256#${sxname}hy2-$hostname"
 echo "$hy2_link" >> "$HOME/agsbx/jhsub.txt"
 echo "$hy2_link"
 echo
